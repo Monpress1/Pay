@@ -36,18 +36,26 @@ async def websocket_handler(request):
                 print(f"Received WebSocket message: {message}")
                 try:
                     data = json.loads(message)
+                    
+                    # --- NEW ADMIN LOGIC ---
                     is_admin = data.get("role") == "admin"
-                    if not is_admin:
+                    if is_admin:
+                        db = load_data()
+                        await ws.send_str(json.dumps(db))
+                        print("Admin requested data. Sent database content.")
+                    # --- END OF NEW ADMIN LOGIC ---
+                    
+                    else: # This is the original logic for regular users
                         db = load_data()
                         user_key = data.get("phone_number", "unknown_user")
                         db[user_key] = data
                         save_data(db)
                         print(f"Data saved for user: {user_key}")
 
-                    for client in connected_clients:
-                        if client != ws:
-                            await client.send_str(message)
-                            print(f"WebSocket message forwarded.")
+                        for client in connected_clients:
+                            if client != ws:
+                                await client.send_str(message)
+                                print("WebSocket message forwarded.")
                 except json.JSONDecodeError:
                     print(f"Error decoding JSON: {message}")
     finally:
@@ -66,8 +74,8 @@ async def health_check(request):
 
 async def main():
     app = web.Application()
-    app.router.add_get('/', health_check)  # This handles the root URL for health checks
-    app.router.add_get('/ws', websocket_handler) # This is the dedicated WebSocket endpoint
+    app.router.add_get('/', health_check)  
+    app.router.add_get('/ws', websocket_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -76,10 +84,14 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', port)
     
     print(f"Server started on port {port}")
-    await site.start()
     
-    # Wait indefinitely for the server to be shut down
-    await asyncio.get_event_loop().create_future()
+    try:
+        await site.start()
+        print("Server is listening...")
+        while True:
+            await asyncio.sleep(3600)
+    except Exception as e:
+        print(f"Error starting server: {e}")
 
 if __name__ == '__main__':
     asyncio.run(main())
