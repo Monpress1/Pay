@@ -1,10 +1,7 @@
 import asyncio
 import websockets
 import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# --- WebSocket Server Setup (from before) ---
+import os
 
 connected_clients = set()
 database_file = 'database.json'
@@ -53,31 +50,13 @@ async def handler(websocket, path):
         connected_clients.remove(websocket)
         print(f"WebSocket client disconnected. Total: {len(connected_clients)}")
 
-# --- HTTP Server for Health Checks (The new part) ---
-
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        # This is the endpoint that will be "pinged"
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(b"Server is awake!")
-
-def run_http_server():
-    httpd = HTTPServer(('0.0.0.0', 8000), KeepAliveHandler)
-    print("HTTP Keep-Alive server started on port 8000")
-    httpd.serve_forever()
-
-# --- Main Entry Point ---
+async def main():
+    # Use the port assigned by Render, defaulting to 8765
+    port = int(os.environ.get('PORT', 8765))
+    
+    server = await websockets.serve(handler, "0.0.0.0", port)
+    print(f"WebSocket server started on port {port}")
+    await server.wait_closed()
 
 if __name__ == "__main__":
-    # Start the HTTP server in a separate thread
-    http_thread = threading.Thread(target=run_http_server)
-    http_thread.daemon = True
-    http_thread.start()
-
-    # Start the WebSocket server in the main thread
-    websocket_server = websockets.serve(handler, "0.0.0.0", 8765)
-    print("WebSocket server started on port 8765")
-    asyncio.get_event_loop().run_until_complete(websocket_server)
-    asyncio.get_event_loop().run_forever()
+    asyncio.run(main())
