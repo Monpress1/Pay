@@ -52,8 +52,23 @@ async def start_matchmaking_loop():
     """Continuously tries to match players in the queue."""
     while True:
         if len(MATCHMAKING_QUEUE) >= 2:
+            # Pop the first two players from the queue
             player1 = MATCHMAKING_QUEUE.pop(0)
             player2 = MATCHMAKING_QUEUE.pop(0)
+
+            # Check if player1's WebSocket is still open
+            if player1['ws'].closed:
+                print(f"Player {player1['name']} disconnected. Re-queuing player {player2['name']}.")
+                # If player1 is gone, re-queue player2 and continue the loop
+                MATCHMAKING_QUEUE.insert(0, player2)
+                continue
+            
+            # Check if player2's WebSocket is still open
+            if player2['ws'].closed:
+                print(f"Player {player2['name']} disconnected. Re-queuing player {player1['name']}.")
+                # If player2 is gone, re-queue player1 and continue the loop
+                MATCHMAKING_QUEUE.insert(0, player1)
+                continue
 
             game_id = f"game_{random.randint(1000, 9999)}"
             game_type = player1['game_type']
@@ -214,7 +229,7 @@ async def websocket_handler(request):
                             pass
                 
                 elif action == "ping":
-                    await ws.send_str(json.dumps({"action": "pong"}))
+                    await ws.send_str(json.dumps({"action": "pong", "timestamp": message.get('timestamp')}))
     
     finally:
         connected_clients.remove(ws)
