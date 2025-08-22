@@ -26,8 +26,14 @@ def load_data():
     """Load data from the JSON file."""
     try:
         with open(DATABASE_FILE, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Ensure all keys exist, even if the file is empty or corrupt
+            if 'users' not in data: data['users'] = {}
+            if 'leaderboard' not in data: data['leaderboard'] = []
+            if 'admin_chat' not in data: data['admin_chat'] = []
+            return data
     except (FileNotFoundError, json.JSONDecodeError):
+        # Return a new, correctly structured dictionary if the file is invalid
         return {'users': {}, 'leaderboard': [], 'admin_chat': []}
 
 def save_data(data):
@@ -90,6 +96,10 @@ connected_clients = set()
 
 async def websocket_handler(request):
     """Handles WebSocket connections and messages."""
+    # Check if the request is for a WebSocket connection
+    if not request.headers.get("Upgrade") == "websocket":
+        return web.Response(text="This endpoint is for WebSockets only.", status=400)
+        
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     connected_clients.add(ws)
@@ -216,7 +226,6 @@ async def websocket_handler(request):
 async def main():
     app = web.Application()
     
-    # Configure CORS for your WebSocket route
     cors = aiohttp_cors.setup(app, defaults={
         "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
@@ -226,7 +235,6 @@ async def main():
         )
     })
 
-    # Add the WebSocket route and apply CORS to it in a single step
     resource = cors.add(app.router.add_resource('/ws'))
     resource.add_route('GET', websocket_handler)
 
