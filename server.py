@@ -8,7 +8,7 @@ import aiohttp_cors
 
 # --- Game-specific imports ---
 from games.snake import SnakeGame
-# You will add other imports here as you create the files, e.g.,
+# These imports are placeholders. You will need to create the corresponding files.
 # from games.asteroids import AsteroidsGame
 # from games.trivia import TriviaGame
 # from games.drawing import DrawingGame
@@ -201,7 +201,6 @@ async def websocket_handler(request):
                             await client_ws.send_str(json.dumps({"action": "game_state", "state": game_state}))
                             
                         if game_state.get('winner'):
-                            # Logic to handle a game ending and sending final data
                             pass
                 
                 elif action == "ping":
@@ -227,12 +226,9 @@ async def main():
         )
     })
 
-    app.router.add_get('/ws', websocket_handler)
-    
-    # Add CORS to the WebSocket route
-    resource = cors.add(app.router.add_resource("/ws"))
-    cors.add(resource.add_route("GET", websocket_handler))
-
+    # Add the WebSocket route and apply CORS to it in a single step
+    resource = cors.add(app.router.add_resource('/ws'))
+    resource.add_route('GET', websocket_handler)
 
     runner = web.AppRunner(app)
     await runner.setup()
