@@ -4,14 +4,15 @@ import os
 import random
 from datetime import datetime
 from aiohttp import web
+import aiohttp_cors
 
 # --- Game-specific imports ---
 from games.snake import SnakeGame
-# These imports are placeholders. You will need to create the corresponding files.
-from games.asteroids import AsteroidsGame  # Example: from games/asteroids.py
-from games.trivia import TriviaGame        # Example: from games/trivia.py
-from games.drawing import DrawingGame      # Example: from games/drawing.py
-from games.twotruths import TwoTruthsGame  # Example: from games/twotruths.py
+# You will add other imports here as you create the files, e.g.,
+# from games.asteroids import AsteroidsGame
+# from games.trivia import TriviaGame
+# from games.drawing import DrawingGame
+# from games.twotruths import TwoTruthsGame
 
 # --- Configuration ---
 DATABASE_FILE = 'database.json'
@@ -55,8 +56,6 @@ async def start_matchmaking_loop():
             game_instance = None
             if game_type == 'snake':
                 game_instance = SnakeGame(player1['id'], player2['id'])
-            elif game_type == 'asteroids':
-                game_instance = AsteroidsGame(player1['id'], player2['id'])
             # Add elif blocks for other games as you implement them
             
             if game_instance:
@@ -202,6 +201,7 @@ async def websocket_handler(request):
                             await client_ws.send_str(json.dumps({"action": "game_state", "state": game_state}))
                             
                         if game_state.get('winner'):
+                            # Logic to handle a game ending and sending final data
                             pass
                 
                 elif action == "ping":
@@ -216,7 +216,24 @@ async def websocket_handler(request):
 
 async def main():
     app = web.Application()
+    
+    # Configure CORS for your WebSocket route
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods="*",
+        )
+    })
+
     app.router.add_get('/ws', websocket_handler)
+    
+    # Add CORS to the WebSocket route
+    resource = cors.add(app.router.add_resource("/ws"))
+    cors.add(resource.add_route("GET", websocket_handler))
+
+
     runner = web.AppRunner(app)
     await runner.setup()
     
