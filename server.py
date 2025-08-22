@@ -8,7 +8,7 @@ import aiohttp_cors
 
 # --- Game-specific imports ---
 from games.snake import SnakeGame
-# These imports are placeholders. You will need to create the corresponding files.
+# You will add other imports here as you create the files, e.g.,
 # from games.asteroids import AsteroidsGame
 # from games.trivia import TriviaGame
 # from games.drawing import DrawingGame
@@ -19,6 +19,7 @@ DATABASE_FILE = 'database.json'
 MATCHMAKING_QUEUE = []
 ADMIN_SESSIONS = set()
 GAMES_IN_PROGRESS = {}
+connected_clients = set()
 
 # --- Utility Functions ---
 
@@ -27,13 +28,11 @@ def load_data():
     try:
         with open(DATABASE_FILE, 'r') as f:
             data = json.load(f)
-            # Ensure all keys exist, even if the file is empty or corrupt
             if 'users' not in data: data['users'] = {}
             if 'leaderboard' not in data: data['leaderboard'] = []
             if 'admin_chat' not in data: data['admin_chat'] = []
             return data
     except (FileNotFoundError, json.JSONDecodeError):
-        # Return a new, correctly structured dictionary if the file is invalid
         return {'users': {}, 'leaderboard': [], 'admin_chat': []}
 
 def save_data(data):
@@ -43,8 +42,9 @@ def save_data(data):
 
 async def broadcast(message):
     """Broadcast a message to all connected clients."""
-    for client in connected_clients:
-        await client.send_str(json.dumps(message))
+    for client in connected_clients.copy():
+        if not client.closed:
+            await client.send_str(json.dumps(message))
 
 # --- Matchmaking Logic ---
 
@@ -52,32 +52,25 @@ async def start_matchmaking_loop():
     """Continuously tries to match players in the queue."""
     while True:
         if len(MATCHMAKING_QUEUE) >= 2:
-            # Pop the first two players from the queue
             player1 = MATCHMAKING_QUEUE.pop(0)
             player2 = MATCHMAKING_QUEUE.pop(0)
 
-            # Check if player1's WebSocket is still open
             if player1['ws'].closed:
-                print(f"Player {player1['name']} disconnected. Re-queuing player {player2['name']}.")
-                # If player1 is gone, re-queue player2 and continue the loop
+                print(f"{player1['name']} disconnected. Re-queuing {player2['name']}.")
                 MATCHMAKING_QUEUE.insert(0, player2)
                 continue
             
-            # Check if player2's WebSocket is still open
             if player2['ws'].closed:
-                print(f"Player {player2['name']} disconnected. Re-queuing player {player1['name']}.")
-                # If player2 is gone, re-queue player1 and continue the loop
+                print(f"{player2['name']} disconnected. Re-queuing {player1['name']}.")
                 MATCHMAKING_QUEUE.insert(0, player1)
                 continue
 
             game_id = f"game_{random.randint(1000, 9999)}"
             game_type = player1['game_type']
             
-            # Create an instance of the appropriate game class
             game_instance = None
             if game_type == 'snake':
                 game_instance = SnakeGame(player1['id'], player2['id'])
-            # Add elif blocks for other games as you implement them
             
             if game_instance:
                 GAMES_IN_PROGRESS[game_id] = {
@@ -105,16 +98,15 @@ async def start_matchmaking_loop():
                 print(f"Match found for {game_type}: {player1['name']} vs {player2['name']} (Game ID: {game_id})")
         await asyncio.sleep(5)
 
-# --- WebSocket & Admin Handlers ---
+# --- Standard HTTP Handler ---
+async def handle_status_check(request):
+    """Handles standard HTTP GET requests for health checks."""
+    return web.Response(text="Server is running and ready for WebSocket connections.")
 
-connected_clients = set()
+# --- WebSocket Handler ---
 
 async def websocket_handler(request):
     """Handles WebSocket connections and messages."""
-    # Check if the request is for a WebSocket connection
-    if not request.headers.get("Upgrade") == "websocket":
-        return web.Response(text="This endpoint is for WebSockets only.", status=400)
-        
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     connected_clients.add(ws)
@@ -145,12 +137,16 @@ async def websocket_handler(request):
                 elif is_admin:
                     if action == "increase_coins":
                         user_id = message.get("user_id")
-                        coins_to_add = message.get("coins")
+                        coins_to_add = message.get("coins", 0)
                         db = load_data()
                         if user_id in db['users']:
                             db['users'][user_id]['coins'] += coins_to_add
                             save_data(db)
-                            await ws.send_str(json.dumps({"action": "coins_updated", "user_id": user_id, "new_coins": db['users'][user_id]['coins']}))
+                            await ws.send_str(json.dumps({
+                                "action": "coins_updated", 
+                                "user_id": user_id, 
+                                "new_coins": db['users'][user_id]['coins']
+                            }))
                             print(f"Increased coins for {user_id} by {coins_to_add}.")
                     
                     elif action == "send_admin_message":
@@ -177,20 +173,26 @@ async def websocket_handler(request):
                         user_info['id'] = phone_number
                         user_info['name'] = name
                         save_data(db)
-                        await ws.send_str(json.dumps({"action": "signup_success", "name": name, "coins": 100}))
+                        await ws.send_str(json.dumps({
+                            "action": "signup_success", 
+                            "name": name, 
+                            "coins": 100
+                        }))
                         print(f"New user signed up: {name}")
                     else:
-                        await ws.send_str(json.dumps({"action": "signup_failed", "reason": "User already exists"}))
+                        await ws.send_str(json.dumps({
+                            "action": "signup_failed", 
+                            "reason": "User already exists"
+                        }))
                 
                 elif action == "join_matchmaking":
                     user_info['id'] = message.get('user_id')
                     user_info['name'] = message.get('name')
                     user_info['game_type'] = message.get('game_type')
-                    MATCHMAKING_QUEUE.append(user_info)
+                    MATCHMAKING_QUEUE.append(user_info.copy())
                     await ws.send_str(json.dumps({"action": "matchmaking_started"}))
                     print(f"User {user_info['name']} joined the {user_info['game_type']} matchmaking queue.")
                 
-                # --- Game-specific logic handling ---
                 elif action == "game_win":
                     winner_id = message.get("winner_id")
                     score = message.get("score")
@@ -204,11 +206,16 @@ async def websocket_handler(request):
                                 "score": score,
                                 "timestamp": datetime.now().isoformat()
                             })
-                            db['leaderboard'].append({"user_id": winner_id, "score": score, "timestamp": datetime.now().isoformat()})
+                            db['leaderboard'].append({
+                                "user_id": winner_id, 
+                                "score": score, 
+                                "timestamp": datetime.now().isoformat()
+                            })
                             save_data(db)
-                            
-                            await broadcast({"action": "leaderboard_updated", "leaderboard": db['leaderboard']})
-                        
+                            await broadcast({
+                                "action": "leaderboard_updated", 
+                                "leaderboard": db['leaderboard']
+                            })
                         del GAMES_IN_PROGRESS[game_id]
                         print(f"Game {game_id} ended. Winner: {winner_id}")
                 
@@ -223,18 +230,23 @@ async def websocket_handler(request):
                         game_state = game.get_state()
                         
                         for client_ws in GAMES_IN_PROGRESS[game_id]['players'].values():
-                            await client_ws.send_str(json.dumps({"action": "game_state", "state": game_state}))
-                            
-                        if game_state.get('winner'):
-                            pass
+                            if not client_ws.closed:
+                                await client_ws.send_str(json.dumps({
+                                    "action": "game_state", 
+                                    "state": game_state
+                                }))
                 
                 elif action == "ping":
-                    await ws.send_str(json.dumps({"action": "pong", "timestamp": message.get('timestamp')}))
+                    await ws.send_str(json.dumps({
+                        "action": "pong", 
+                        "timestamp": message.get('timestamp')
+                    }))
     
     finally:
-        connected_clients.remove(ws)
-        if ws in ADMIN_SESSIONS:
-            ADMIN_SESSIONS.remove(ws)
+        connected_clients.discard(ws)
+        ADMIN_SESSIONS.discard(ws)
+
+    return ws
 
 # --- Main Application Setup ---
 
@@ -250,6 +262,10 @@ async def main():
         )
     })
 
+    # Add a standard HTTP route for health checks on the root URL
+    app.router.add_get('/', handle_status_check)
+    
+    # Add the WebSocket route for the game clients
     resource = cors.add(app.router.add_resource('/ws'))
     resource.add_route('GET', websocket_handler)
 
@@ -263,6 +279,7 @@ async def main():
 
     try:
         await site.start()
+        print(f"Server started on port {port}")
         await asyncio.Event().wait()
     except Exception as e:
         print(f"Error starting server: {e}")
