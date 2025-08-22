@@ -6,19 +6,12 @@ from datetime import datetime
 from aiohttp import web
 import aiohttp_cors
 
-# --- Game-specific imports ---
-from games.snake import SnakeGame
-from games.asteroids import AsteroidsGame
-from games.trivia import TriviaGame
-from games.drawing import DrawingGame
-from games.twotruths import TwoTruthsGame
-
 # --- Configuration ---
 DATABASE_FILE = 'database.json'
 ADMIN_SESSIONS = set()
 GAMES_IN_PROGRESS = {}
-connected_clients = {}  # Store clients by user_id
-player_challenges = {} # Track active challenges {challenger_id: {'opponent_id': ..., 'game_type': ...}}
+connected_clients = {}
+player_challenges = {}
 
 # --- Utility Functions ---
 
@@ -52,24 +45,28 @@ async def broadcast_online_players():
             if not client['ws'].closed:
                 await client['ws'].send_str(json.dumps(message))
         
-        await asyncio.sleep(10) # Broadcast every 10 seconds
+        await asyncio.sleep(10)
 
 async def challenge_timeout(challenger_id, opponent_id):
     """Handles challenge expiration."""
     await asyncio.sleep(15)
     if challenger_id in player_challenges and player_challenges[challenger_id]['opponent_id'] == opponent_id:
-        challenger_ws = connected_clients.get(challenger_id)['ws']
-        opponent_ws = connected_clients.get(opponent_id)['ws']
+        challenger_ws = connected_clients.get(challenger_id, {}).get('ws')
+        opponent_ws = connected_clients.get(opponent_id, {}).get('ws')
         
-        await challenger_ws.send_str(json.dumps({
-            "action": "challenge_timeout",
-            "opponent_name": connected_clients[opponent_id]['name']
-        }))
-        await opponent_ws.send_str(json.dumps({
-            "action": "challenge_timeout",
-            "challenger_name": connected_clients[challenger_id]['name']
-        }))
-        del player_challenges[challenger_id]
+        if challenger_ws and not challenger_ws.closed:
+            await challenger_ws.send_str(json.dumps({
+                "action": "challenge_timeout",
+                "opponent_name": connected_clients.get(opponent_id, {}).get('name')
+            }))
+        if opponent_ws and not opponent_ws.closed:
+            await opponent_ws.send_str(json.dumps({
+                "action": "challenge_timeout",
+                "challenger_name": connected_clients.get(challenger_id, {}).get('name')
+            }))
+        
+        if challenger_id in player_challenges:
+            del player_challenges[challenger_id]
 
 # --- Standard HTTP Handler ---
 async def handle_status_check(request):
@@ -91,7 +88,6 @@ async def websocket_handler(request):
                 message = json.loads(msg.data)
                 action = message.get("action")
                 
-                # Handling user sign-up
                 if action == "signup":
                     phone_number = message.get("phone_number")
                     name = message.get("name")
@@ -121,7 +117,6 @@ async def websocket_handler(request):
                             "user_id": user_id
                         }))
 
-                # Handling challenge requests
                 elif action == "challenge_request":
                     challenger_id = message.get("challenger_id")
                     opponent_id = message.get("opponent_id")
@@ -140,7 +135,6 @@ async def websocket_handler(request):
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Opponent not available."}))
 
-                # Handling accepted challenges
                 elif action == "accept_challenge":
                     challenger_id = message.get("challenger_id")
                     opponent_id = message.get("opponent_id")
@@ -149,59 +143,45 @@ async def websocket_handler(request):
                         game_type = player_challenges[challenger_id]['game_type']
                         game_id = f"game_{random.randint(1000, 9999)}"
                         
-                        # Instantiate the correct game class
-                        game_instance = None
-                        if game_type == 'snake':
-                            game_instance = SnakeGame(challenger_id, opponent_id)
-                        elif game_type == 'asteroids':
-                            game_instance = AsteroidsGame(challenger_id, opponent_id)
-                        elif game_type == 'trivia':
-                            game_instance = TriviaGame(challenger_id, opponent_id)
-                        elif game_type == 'drawing':
-                            game_instance = DrawingGame(challenger_id, opponent_id)
-                        elif game_type == 'twotruths':
-                            game_instance = TwoTruthsGame(challenger_id, opponent_id)
-
-                        if game_instance:
-                            GAMES_IN_PROGRESS[game_id] = {
-                                'game_instance': game_instance,
-                                'players': {
-                                    challenger_id: connected_clients[challenger_id]['ws'],
-                                    opponent_id: connected_clients[opponent_id]['ws']
-                                },
-                                'state': 'in_progress'
+                        GAMES_IN_PROGRESS[game_id] = {
+                            'players': {
+                                challenger_id: connected_clients[challenger_id]['ws'],
+                                opponent_id: connected_clients[opponent_id]['ws']
                             }
-                            await connected_clients[challenger_id]['ws'].send_str(json.dumps({
-                                "action": "match_found",
-                                "game_id": game_id,
-                                "game_type": game_type,
-                                "opponent_name": connected_clients[opponent_id]['name']
-                            }))
-                            await connected_clients[opponent_id]['ws'].send_str(json.dumps({
-                                "action": "match_found",
-                                "game_id": game_id,
-                                "game_type": game_type,
-                                "opponent_name": connected_clients[challenger_id]['name']
-                            }))
-                            del player_challenges[challenger_id]
-                            # Start the game loop for this specific game
-                            asyncio.create_task(game_instance.game_loop())
+                        }
+                        await connected_clients[challenger_id]['ws'].send_str(json.dumps({
+                            "action": "match_found",
+                            "game_id": game_id,
+                            "game_type": game_type,
+                            "opponent_name": connected_clients[opponent_id]['name']
+                        }))
+                        await connected_clients[opponent_id]['ws'].send_str(json.dumps({
+                            "action": "match_found",
+                            "game_id": game_id,
+                            "game_type": game_type,
+                            "opponent_name": connected_clients[challenger_id]['name']
+                        }))
+                        del player_challenges[challenger_id]
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Challenge expired or invalid."}))
 
-                # Handling game-specific actions (e.g., player input)
                 elif action == "game_action":
                     game_id = message.get("game_id")
+                    player_id = message.get("player_id")
+                    
                     if game_id in GAMES_IN_PROGRESS:
-                        game_instance = GAMES_IN_PROGRESS[game_id]['game_instance']
-                        await game_instance.handle_input(message)
+                        players_in_game = GAMES_IN_PROGRESS[game_id]['players']
+                        opponent_id = next(p for p in players_in_game if p != player_id)
+                        
+                        opponent_ws = players_in_game.get(opponent_id)
+                        if opponent_ws and not opponent_ws.closed:
+                            await opponent_ws.send_str(json.dumps(message))
 
                 elif action == "game_ended":
                     game_id = message.get("game_id")
                     if game_id in GAMES_IN_PROGRESS:
-                        # You'll need to send the final score or result
                         del GAMES_IN_PROGRESS[game_id]
-
+                
                 elif action == "ping":
                     await ws.send_str(json.dumps({"action": "pong", "timestamp": message.get('timestamp')}))
     
@@ -213,7 +193,6 @@ async def websocket_handler(request):
     return ws
 
 # --- Main Application Setup ---
-
 async def main():
     app = web.Application()
     cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*")})
