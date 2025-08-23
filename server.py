@@ -112,7 +112,7 @@ async def websocket_handler(request):
                 try:
                     message = json.loads(msg.data)
                 except json.JSONDecodeError:
-                    continue  # Skip invalid JSON messages
+                    continue
                 
                 action = message.get("action")
 
@@ -165,7 +165,7 @@ async def websocket_handler(request):
                         if game_type == "tictactoe":
                             game_id, challenger_name, opponent_name = create_tictactoe_game(challenger_id, opponent_id)
                             
-                            # Notify Challenger
+                            # Notify Challenger with their sign
                             challenger_ws = connected_clients[challenger_id]['ws']
                             if not challenger_ws.closed:
                                 await challenger_ws.send_str(json.dumps({
@@ -176,7 +176,7 @@ async def websocket_handler(request):
                                     "your_sign": GAMES_IN_PROGRESS[game_id]["players"][challenger_id]["sign"]
                                 }))
                             
-                            # Notify Opponent
+                            # Notify Opponent with their sign
                             opponent_ws = connected_clients[opponent_id]['ws']
                             if not opponent_ws.closed:
                                 await opponent_ws.send_str(json.dumps({
@@ -255,7 +255,6 @@ async def main():
     port = int(os.environ.get('PORT', 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     
-    # Start the broadcast task
     asyncio.create_task(broadcast_online_players())
 
     try:
