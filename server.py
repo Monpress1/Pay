@@ -1,7 +1,7 @@
-import asyncio
 import json
 import os
 import random
+import asyncio
 from datetime import datetime
 from aiohttp import web
 import aiohttp_cors
@@ -14,9 +14,7 @@ connected_clients = {}
 player_challenges = {}
 
 # --- Utility Functions ---
-
 def load_data():
-    """Load data from the JSON file."""
     try:
         with open(DATABASE_FILE, 'r') as f:
             data = json.load(f)
@@ -28,12 +26,10 @@ def load_data():
         return {'users': {}, 'leaderboard': [], 'admin_chat': []}
 
 def save_data(data):
-    """Save data to the JSON file."""
     with open(DATABASE_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
 async def broadcast_online_players():
-    """Broadcast the list of online players to all clients."""
     while True:
         online_list = [
             {'id': user_id, 'name': client['name']}
@@ -48,7 +44,6 @@ async def broadcast_online_players():
         await asyncio.sleep(10)
 
 async def challenge_timeout(challenger_id, opponent_id):
-    """Handles challenge expiration."""
     await asyncio.sleep(15)
     if challenger_id in player_challenges and player_challenges[challenger_id]['opponent_id'] == opponent_id:
         challenger_ws = connected_clients.get(challenger_id, {}).get('ws')
@@ -68,15 +63,44 @@ async def challenge_timeout(challenger_id, opponent_id):
         if challenger_id in player_challenges:
             del player_challenges[challenger_id]
 
-# --- Standard HTTP Handler ---
+# --- Game Logic Helpers ---
+def create_tictactoe_game(challenger_id, opponent_id):
+    """Initialize a Tic Tac Toe game state."""
+    game_id = f"game_{random.randint(1000, 9999)}"
+    challenger_name = connected_clients[challenger_id]['name']
+    opponent_name = connected_clients[opponent_id]['name']
+
+    GAMES_IN_PROGRESS[game_id] = {
+        "type": "tictactoe",
+        "players": {
+            challenger_id: {"ws": connected_clients[challenger_id]['ws'], "sign": "X"},
+            opponent_id: {"ws": connected_clients[opponent_id]['ws'], "sign": "O"}
+        },
+        "board": [None] * 9,
+        "turn": "X"
+    }
+
+    return game_id, challenger_name, opponent_name
+
+def check_tictactoe_winner(board):
+    wins = [
+        [0,1,2],[3,4,5],[6,7,8], # rows
+        [0,3,6],[1,4,7],[2,5,8], # cols
+        [0,4,8],[2,4,6]          # diagonals
+    ]
+    for a,b,c in wins:
+        if board[a] and board[a] == board[b] == board[c]:
+            return board[a]
+    if all(board):
+        return "draw"
+    return None
+
+# --- HTTP Handler ---
 async def handle_status_check(request):
-    """Handles standard HTTP GET requests for health checks."""
     return web.Response(text="Server is running and ready for WebSocket connections.")
 
 # --- WebSocket Handler ---
-
 async def websocket_handler(request):
-    """Handles WebSocket connections and messages."""
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     
@@ -87,7 +111,8 @@ async def websocket_handler(request):
             if msg.type == web.WSMsgType.TEXT:
                 message = json.loads(msg.data)
                 action = message.get("action")
-                
+
+                # --- AUTH / LOBBY ---
                 if action == "signup":
                     phone_number = message.get("phone_number")
                     name = message.get("name")
@@ -99,23 +124,14 @@ async def websocket_handler(request):
                             "history": []
                         }
                         save_data(db)
-                        user_id = phone_number
-                        connected_clients[user_id] = {'ws': ws, 'name': name}
-                        await ws.send_str(json.dumps({
-                            "action": "signup_success", 
-                            "name": name, 
-                            "coins": 100, 
-                            "user_id": user_id
-                        }))
-                    else:
-                        user_id = phone_number
-                        connected_clients[user_id] = {'ws': ws, 'name': db['users'][phone_number]['name']}
-                        await ws.send_str(json.dumps({
-                            "action": "login_success", 
-                            "name": db['users'][phone_number]['name'], 
-                            "coins": db['users'][phone_number]['coins'],
-                            "user_id": user_id
-                        }))
+                    user_id = phone_number
+                    connected_clients[user_id] = {'ws': ws, 'name': db['users'][phone_number]['name']}
+                    await ws.send_str(json.dumps({
+                        "action": "login_success", 
+                        "name": db['users'][phone_number]['name'], 
+                        "coins": db['users'][phone_number]['coins'],
+                        "user_id": user_id
+                    }))
 
                 elif action == "challenge_request":
                     challenger_id = message.get("challenger_id")
@@ -141,41 +157,58 @@ async def websocket_handler(request):
                     
                     if challenger_id in player_challenges and player_challenges[challenger_id]['opponent_id'] == opponent_id:
                         game_type = player_challenges[challenger_id]['game_type']
-                        game_id = f"game_{random.randint(1000, 9999)}"
                         
-                        GAMES_IN_PROGRESS[game_id] = {
-                            'players': {
-                                challenger_id: connected_clients[challenger_id]['ws'],
-                                opponent_id: connected_clients[opponent_id]['ws']
-                            }
-                        }
-                        await connected_clients[challenger_id]['ws'].send_str(json.dumps({
-                            "action": "match_found",
-                            "game_id": game_id,
-                            "game_type": game_type,
-                            "opponent_name": connected_clients[opponent_id]['name']
-                        }))
-                        await connected_clients[opponent_id]['ws'].send_str(json.dumps({
-                            "action": "match_found",
-                            "game_id": game_id,
-                            "game_type": game_type,
-                            "opponent_name": connected_clients[challenger_id]['name']
-                        }))
+                        if game_type == "tictactoe":
+                            game_id, challenger_name, opponent_name = create_tictactoe_game(challenger_id, opponent_id)
+                            # Notify players
+                            for pid, pdata in GAMES_IN_PROGRESS[game_id]["players"].items():
+                                await pdata["ws"].send_str(json.dumps({
+                                    "action": "game_start",
+                                    "game_id": game_id,
+                                    "game_type": "tictactoe",
+                                    "your_sign": pdata["sign"],
+                                    "opponent_name": opponent_name if pid == challenger_id else challenger_name,
+                                    "current_turn": "X"
+                                }))
+                        else:
+                            # other games can be added here
+                            pass
+                        
                         del player_challenges[challenger_id]
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Challenge expired or invalid."}))
 
+                # --- GAME ACTIONS ---
                 elif action == "game_action":
                     game_id = message.get("game_id")
                     player_id = message.get("player_id")
-                    
+                    move = message.get("move")  # {index: int}
+
                     if game_id in GAMES_IN_PROGRESS:
-                        players_in_game = GAMES_IN_PROGRESS[game_id]['players']
-                        opponent_id = next(p for p in players_in_game if p != player_id)
-                        
-                        opponent_ws = players_in_game.get(opponent_id)
-                        if opponent_ws and not opponent_ws.closed:
-                            await opponent_ws.send_str(json.dumps(message))
+                        game = GAMES_IN_PROGRESS[game_id]
+                        if game["type"] == "tictactoe":
+                            sign = game["players"][player_id]["sign"]
+                            index = move["index"]
+
+                            if game["turn"] == sign and game["board"][index] is None:
+                                game["board"][index] = sign
+                                game["turn"] = "O" if sign == "X" else "X"
+
+                                winner = check_tictactoe_winner(game["board"])
+
+                                # Broadcast move to both players
+                                for pid, pdata in game["players"].items():
+                                    await pdata["ws"].send_str(json.dumps({
+                                        "action": "move_made",
+                                        "game_id": game_id,
+                                        "index": index,
+                                        "symbol": sign,
+                                        "next_turn": game["turn"],
+                                        "winner": winner
+                                    }))
+                                
+                                if winner:
+                                    del GAMES_IN_PROGRESS[game_id]
 
                 elif action == "game_ended":
                     game_id = message.get("game_id")
@@ -195,7 +228,9 @@ async def websocket_handler(request):
 # --- Main Application Setup ---
 async def main():
     app = web.Application()
-    cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*")})
+    cors = aiohttp_cors.setup(app, defaults={"*": aiohttp_cors.ResourceOptions(
+        allow_credentials=True, expose_headers="*", allow_headers="*", allow_methods="*"
+    )})
 
     app.router.add_get('/', handle_status_check)
     resource = cors.add(app.router.add_resource('/ws'))
