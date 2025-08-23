@@ -2,7 +2,6 @@ import json
 import os
 import random
 import asyncio
-from datetime import datetime
 from aiohttp import web
 import aiohttp_cors
 
@@ -67,6 +66,8 @@ async def challenge_timeout(challenger_id, opponent_id):
 def create_tictactoe_game(challenger_id, opponent_id):
     """Initialize a Tic Tac Toe game state."""
     game_id = f"game_{random.randint(1000, 9999)}"
+    
+    # Store the WebSocket objects directly to make it easier to send messages
     challenger_name = connected_clients[challenger_id]['name']
     opponent_name = connected_clients[opponent_id]['name']
 
@@ -138,7 +139,7 @@ async def websocket_handler(request):
                     opponent_id = message.get("opponent_id")
                     game_type = message.get("game_type")
 
-                    if opponent_id in connected_clients and opponent_id not in player_challenges.values():
+                    if opponent_id in connected_clients and opponent_id not in [v['opponent_id'] for v in player_challenges.values()]:
                         player_challenges[challenger_id] = {'opponent_id': opponent_id, 'game_type': game_type}
                         opponent_ws = connected_clients[opponent_id]['ws']
                         await opponent_ws.send_str(json.dumps({
@@ -160,20 +161,29 @@ async def websocket_handler(request):
                         
                         if game_type == "tictactoe":
                             game_id, challenger_name, opponent_name = create_tictactoe_game(challenger_id, opponent_id)
-                            # Notify players
-                            for pid, pdata in GAMES_IN_PROGRESS[game_id]["players"].items():
-                                await pdata["ws"].send_str(json.dumps({
-                                    "action": "game_start",
+                            
+                            # Notify Challenger
+                            challenger_ws = connected_clients[challenger_id]['ws']
+                            if not challenger_ws.closed:
+                                await challenger_ws.send_str(json.dumps({
+                                    "action": "match_found",
                                     "game_id": game_id,
                                     "game_type": "tictactoe",
-                                    "your_sign": pdata["sign"],
-                                    "opponent_name": opponent_name if pid == challenger_id else challenger_name,
-                                    "current_turn": "X"
+                                    "opponent_name": opponent_name,
+                                    "your_sign": GAMES_IN_PROGRESS[game_id]["players"][challenger_id]["sign"]
                                 }))
-                        else:
-                            # other games can be added here
-                            pass
-                        
+                            
+                            # Notify Opponent
+                            opponent_ws = connected_clients[opponent_id]['ws']
+                            if not opponent_ws.closed:
+                                await opponent_ws.send_str(json.dumps({
+                                    "action": "match_found",
+                                    "game_id": game_id,
+                                    "game_type": "tictactoe",
+                                    "opponent_name": challenger_name,
+                                    "your_sign": GAMES_IN_PROGRESS[game_id]["players"][opponent_id]["sign"]
+                                }))
+
                         del player_challenges[challenger_id]
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Challenge expired or invalid."}))
@@ -198,14 +208,15 @@ async def websocket_handler(request):
 
                                 # Broadcast move to both players
                                 for pid, pdata in game["players"].items():
-                                    await pdata["ws"].send_str(json.dumps({
-                                        "action": "move_made",
-                                        "game_id": game_id,
-                                        "index": index,
-                                        "symbol": sign,
-                                        "next_turn": game["turn"],
-                                        "winner": winner
-                                    }))
+                                    if not pdata["ws"].closed:
+                                        await pdata["ws"].send_str(json.dumps({
+                                            "action": "move_made",
+                                            "game_id": game_id,
+                                            "index": index,
+                                            "symbol": sign,
+                                            "next_turn": game["turn"],
+                                            "winner": winner
+                                        }))
                                 
                                 if winner:
                                     del GAMES_IN_PROGRESS[game_id]
@@ -241,6 +252,7 @@ async def main():
     port = int(os.environ.get('PORT', 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     
+    # Start the broadcast task
     asyncio.create_task(broadcast_online_players())
 
     try:
