@@ -7,7 +7,6 @@ import aiohttp_cors
 
 # --- Configuration ---
 DATABASE_FILE = 'database.json'
-ADMIN_SESSIONS = set()
 GAMES_IN_PROGRESS = {}
 connected_clients = {}
 player_challenges = {}
@@ -19,10 +18,9 @@ def load_data():
             data = json.load(f)
             if 'users' not in data: data['users'] = {}
             if 'leaderboard' not in data: data['leaderboard'] = []
-            if 'admin_chat' not in data: data['admin_chat'] = []
             return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {'users': {}, 'leaderboard': [], 'admin_chat': []}
+        return {'users': {}, 'leaderboard': []}
 
 def save_data(data):
     with open(DATABASE_FILE, 'w') as f:
@@ -42,42 +40,22 @@ async def broadcast_online_players():
         
         await asyncio.sleep(10)
 
-async def challenge_timeout(challenger_id, opponent_id):
-    await asyncio.sleep(15)
-    if challenger_id in player_challenges and player_challenges[challenger_id]['opponent_id'] == opponent_id:
-        challenger_ws = connected_clients.get(challenger_id, {}).get('ws')
-        opponent_ws = connected_clients.get(opponent_id, {}).get('ws')
-        
-        if challenger_ws and not challenger_ws.closed:
-            await challenger_ws.send_str(json.dumps({
-                "action": "challenge_timeout",
-                "opponent_name": connected_clients.get(opponent_id, {}).get('name')
-            }))
-        if opponent_ws and not opponent_ws.closed:
-            await opponent_ws.send_str(json.dumps({
-                "action": "challenge_timeout",
-                "challenger_name": connected_clients.get(challenger_id, {}).get('name')
-            }))
-        
-        if challenger_id in player_challenges:
-            del player_challenges[challenger_id]
-
-# --- Game Logic Helpers ---
 def create_tictactoe_game(challenger_id, opponent_id):
-    """Initialize a Tic Tac Toe game state."""
+    """Initialize a Tic Tac Toe game state on the server."""
     game_id = f"game_{random.randint(1000, 9999)}"
     
     challenger_name = connected_clients[challenger_id]['name']
     opponent_name = connected_clients[opponent_id]['name']
 
+    # Server decides who is X and who is O. Challenger is always X.
     GAMES_IN_PROGRESS[game_id] = {
         "type": "tictactoe",
         "players": {
-            challenger_id: {"ws": connected_clients[challenger_id]['ws'], "sign": None},
-            opponent_id: {"ws": connected_clients[opponent_id]['ws'], "sign": None}
+            challenger_id: {"ws": connected_clients[challenger_id]['ws'], "sign": "X"},
+            opponent_id: {"ws": connected_clients[opponent_id]['ws'], "sign": "O"}
         },
         "board": [None] * 9,
-        "turn": None # No initial turn, client will decide
+        "turn": "X" # X always starts first
     }
 
     return game_id, challenger_name, opponent_name
@@ -115,18 +93,15 @@ async def websocket_handler(request):
                     continue
                 
                 action = message.get("action")
-                game_id = message.get("game_id")
 
-                # --- AUTH / LOBBY ---
+                # --- LOBBY/AUTH ACTIONS ---
                 if action == "signup":
                     phone_number = message.get("phone_number")
                     name = message.get("name")
                     db = load_data()
                     if phone_number not in db['users']:
                         db['users'][phone_number] = {
-                            "name": name,
-                            "coins": 100,
-                            "history": []
+                            "name": name, "coins": 100, "history": []
                         }
                         save_data(db)
                     user_id = phone_number
@@ -143,7 +118,7 @@ async def websocket_handler(request):
                     opponent_id = message.get("opponent_id")
                     game_type = message.get("game_type")
 
-                    if opponent_id in connected_clients and opponent_id not in [v['opponent_id'] for v in player_challenges.values()]:
+                    if opponent_id in connected_clients and opponent_id != challenger_id:
                         player_challenges[challenger_id] = {'opponent_id': opponent_id, 'game_type': game_type}
                         opponent_ws = connected_clients[opponent_id]['ws']
                         await opponent_ws.send_str(json.dumps({
@@ -152,7 +127,6 @@ async def websocket_handler(request):
                             "game_type": game_type,
                             "challenger_id": challenger_id
                         }))
-                        asyncio.create_task(challenge_timeout(challenger_id, opponent_id))
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Opponent not available."}))
 
@@ -161,74 +135,68 @@ async def websocket_handler(request):
                     opponent_id = message.get("opponent_id")
                     
                     if challenger_id in player_challenges and player_challenges[challenger_id]['opponent_id'] == opponent_id:
-                        game_type = player_challenges[challenger_id]['game_type']
+                        game_id, challenger_name, opponent_name = create_tictactoe_game(challenger_id, opponent_id)
                         
-                        if game_type == "tictactoe":
-                            game_id, challenger_name, opponent_name = create_tictactoe_game(challenger_id, opponent_id)
-                            
-                            # Notify Challenger
-                            challenger_ws = connected_clients[challenger_id]['ws']
-                            if not challenger_ws.closed:
-                                await challenger_ws.send_str(json.dumps({
-                                    "action": "match_found",
-                                    "game_id": game_id,
-                                    "game_type": "tictactoe",
-                                    "opponent_name": opponent_name
-                                }))
-                            
-                            # Notify Opponent
-                            opponent_ws = connected_clients[opponent_id]['ws']
-                            if not opponent_ws.closed:
-                                await opponent_ws.send_str(json.dumps({
-                                    "action": "match_found",
-                                    "game_id": game_id,
-                                    "game_type": "tictactoe",
-                                    "opponent_name": challenger_name
-                                }))
+                        # Tell both clients they've been matched and give them their sign
+                        challenger_ws = connected_clients[challenger_id]['ws']
+                        if not challenger_ws.closed:
+                            await challenger_ws.send_str(json.dumps({
+                                "action": "match_found",
+                                "game_id": game_id,
+                                "opponent_name": opponent_name,
+                                "your_sign": "X",
+                                "turn": "X" # X goes first
+                            }))
+                        
+                        opponent_ws = connected_clients[opponent_id]['ws']
+                        if not opponent_ws.closed:
+                            await opponent_ws.send_str(json.dumps({
+                                "action": "match_found",
+                                "game_id": game_id,
+                                "opponent_name": challenger_name,
+                                "your_sign": "O",
+                                "turn": "X" # X goes first
+                            }))
 
                         del player_challenges[challenger_id]
                     else:
                         await ws.send_str(json.dumps({"action": "challenge_failed", "reason": "Challenge expired or invalid."}))
 
                 # --- GAME ACTIONS ---
-                # A centralized point to forward game-related messages to the opponent
-                elif action == "game_action" and game_id in GAMES_IN_PROGRESS:
-                    game = GAMES_IN_PROGRESS[game_id]
-                    player_id = message.get("player_id")
-                    
-                    # Find the opponent
-                    if player_id in game['players']:
-                        opponent_id = next(iter(p_id for p_id in game['players'] if p_id != player_id))
-                        opponent_ws = connected_clients.get(opponent_id, {}).get('ws')
-
-                        if opponent_ws and not opponent_ws.closed:
-                            # Forward the entire message to the opponent
-                            await opponent_ws.send_str(json.dumps(message))
-
-                    # Process the message on the server (if needed)
-                    if message.get("type") == "make_move":
-                        move = message.get("move")
-                        player_sign = message.get("player_sign")
-                        
-                        if move is not None:
-                            index = move - 1 # Adjust for 0-based array
-                            if game["board"][index] is None:
-                                game["board"][index] = player_sign
-                                
-                                winner = check_tictactoe_winner(game["board"])
-
-                                # Server-side check for winner (optional, but good practice)
-                                if winner:
-                                    # This is where the server can handle post-game logic like updating scores
-                                    pass
-
-                elif action == "game_ended":
+                elif action == "game_action":
                     game_id = message.get("game_id")
+                    player_id = message.get("player_id")
+                    move_index = message.get("move_index")
+
                     if game_id in GAMES_IN_PROGRESS:
-                        del GAMES_IN_PROGRESS[game_id]
-                
+                        game = GAMES_IN_PROGRESS[game_id]
+                        player_sign = game["players"][player_id]["sign"]
+
+                        # Validate the move
+                        if game["turn"] == player_sign and game["board"][move_index] is None:
+                            game["board"][move_index] = player_sign
+                            game["turn"] = "O" if player_sign == "X" else "X"
+
+                            winner = check_tictactoe_winner(game["board"])
+
+                            # Broadcast the move and new game state to both players
+                            for pid, pdata in game["players"].items():
+                                if not pdata["ws"].closed:
+                                    await pdata["ws"].send_str(json.dumps({
+                                        "action": "move_made",
+                                        "index": move_index,
+                                        "symbol": player_sign,
+                                        "next_turn": game["turn"],
+                                        "winner": winner
+                                    }))
+
+                            # If game is over, remove it
+                            if winner:
+                                # Save game result here if needed
+                                del GAMES_IN_PROGRESS[game_id]
+                    
                 elif action == "ping":
-                    await ws.send_str(json.dumps({"action": "pong", "timestamp": message.get('timestamp')}))
+                    await ws.send_str(json.dumps({"action": "pong"}))
     
     finally:
         if user_id in connected_clients:
@@ -241,18 +209,16 @@ async def websocket_handler(request):
                     if opponent_ws and not opponent_ws.closed:
                         opponent_name = connected_clients[user_id]['name']
                         await opponent_ws.send_str(json.dumps({
-                            "action": "game_action",
-                            "game_id": game_id,
-                            "type": "opponent_left",
-                            "message": f"{opponent_name} has left the game."
+                            "action": "game_ended",
+                            "message": f"{opponent_name} has disconnected. You win!",
+                            "winner": game_data["players"][opponent_id]["sign"]
                         }))
                     
                     del GAMES_IN_PROGRESS[game_id]
                     break
             
             del connected_clients[user_id]
-        if ws in ADMIN_SESSIONS:
-            ADMIN_SESSIONS.discard(ws)
+
     return ws
 
 # --- Main Application Setup ---
@@ -282,4 +248,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
