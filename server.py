@@ -67,7 +67,6 @@ def create_tictactoe_game(challenger_id, opponent_id):
     """Initialize a Tic Tac Toe game state."""
     game_id = f"game_{random.randint(1000, 9999)}"
     
-    # Store the WebSocket objects directly to make it easier to send messages
     challenger_name = connected_clients[challenger_id]['name']
     opponent_name = connected_clients[opponent_id]['name']
 
@@ -110,7 +109,11 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
-                message = json.loads(msg.data)
+                try:
+                    message = json.loads(msg.data)
+                except json.JSONDecodeError:
+                    continue  # Skip invalid JSON messages
+                
                 action = message.get("action")
 
                 # --- AUTH / LOBBY ---
@@ -192,15 +195,15 @@ async def websocket_handler(request):
                 elif action == "game_action":
                     game_id = message.get("game_id")
                     player_id = message.get("player_id")
-                    move = message.get("move")  # {index: int}
+                    move = message.get("move")
 
-                    if game_id in GAMES_IN_PROGRESS:
+                    if move is not None and game_id in GAMES_IN_PROGRESS:
                         game = GAMES_IN_PROGRESS[game_id]
                         if game["type"] == "tictactoe":
                             sign = game["players"][player_id]["sign"]
-                            index = move["index"]
+                            index = move.get("index")
 
-                            if game["turn"] == sign and game["board"][index] is None:
+                            if isinstance(index, int) and 0 <= index <= 8 and game["turn"] == sign and game["board"][index] is None:
                                 game["board"][index] = sign
                                 game["turn"] = "O" if sign == "X" else "X"
 
